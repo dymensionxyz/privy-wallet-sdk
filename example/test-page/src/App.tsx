@@ -2,38 +2,62 @@ import { useState } from 'react';
 import {
   WalletSdkProvider,
   useWalletAuth,
-  useAccountFunding,
-  useDeposit,
+  useVaultDeposit,
+  useMessageSigning,
 } from 'privy-wallet-sdk';
-import { useSignMessage } from 'wagmi';
+import type { VaultContractConfig } from 'privy-wallet-sdk';
 import { sepolia } from 'viem/chains';
+import { parseEther } from 'viem';
 
 const appId = import.meta.env.VITE_PRIVY_APP_ID ?? '';
 const depositContractAddress = (import.meta.env.VITE_DEPOSIT_CONTRACT_ADDRESS ??
   '0x0000000000000000000000000000000000000000') as `0x${string}`;
 const serverUrl = (import.meta.env.VITE_SERVER_URL ?? '').replace(/\/$/, '');
 
+const VAULT_ABI = [
+  {
+    name: 'deposit',
+    type: 'function' as const,
+    stateMutability: 'payable' as const,
+    inputs: [],
+    outputs: [],
+  },
+];
+
+const vaultContract: VaultContractConfig = {
+  address: depositContractAddress,
+  abi: VAULT_ABI,
+  functionName: 'deposit',
+};
+
 const sdkConfig = {
   appId,
-  chains: [sepolia],
-  depositContractAddress,
+  chains: [sepolia] as [typeof sepolia],
 };
+
+// ---------------------------------------------------------------------------
+// Test page inner component (must be inside WalletSdkProvider)
+// ---------------------------------------------------------------------------
 
 function TestPage() {
   const auth = useWalletAuth();
-  const funding = useAccountFunding();
-  const deposit = useDeposit({ contractAddress: depositContractAddress });
-  const { signMessageAsync } = useSignMessage();
-  const [validationMessage, setValidationMessage] = useState('');
-  const [validationStatus, setValidationStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const vault = useVaultDeposit({ contract: vaultContract });
+  const signing = useMessageSigning();
 
+  const [depositAmount, setDepositAmount] = useState('0.001');
+  const [validationMessage, setValidationMessage] = useState('');
+  const [submitStatus, setSubmitStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // -- Sign message via SDK, then POST to backend for debug verification --
   const handleSignAndSend = async () => {
-    if (!serverUrl || !auth.address) return;
-    setValidationStatus('pending');
-    setValidationError(null);
+    if (!serverUrl || !auth.address || !validationMessage.trim()) return;
+    setSubmitStatus('pending');
+    setSubmitError(null);
     try {
-      const signature = await signMessageAsync({ message: validationMessage });
+      const signature = await signing.signMessage(validationMessage);
+      if (!signature) throw new Error(signing.error ?? 'Signing failed');
+
       const res = await fetch(`${serverUrl}/testvalidation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -47,17 +71,22 @@ function TestPage() {
         const text = await res.text();
         throw new Error(text || `HTTP ${res.status}`);
       }
-      setValidationStatus('success');
+      setSubmitStatus('success');
     } catch (err) {
-      setValidationStatus('error');
-      setValidationError(err instanceof Error ? err.message : String(err));
+      setSubmitStatus('error');
+      setSubmitError(err instanceof Error ? err.message : String(err));
     }
   };
+
+  const valueWei = (() => {
+    try { return parseEther(depositAmount || '0'); } catch { return undefined; }
+  })();
 
   return (
     <div style={{ padding: 24, maxWidth: 480, margin: '0 auto' }}>
       <h1>Wallet SDK Test Page</h1>
 
+      {/* ---- 1. Auth -------------------------------------------------- */}
       <section style={{ marginBottom: 24 }}>
         <h2>Auth</h2>
         {!auth.isReady ? (
@@ -69,6 +98,9 @@ function TestPage() {
         ) : (
           <div>
             <p>Connected: {auth.address ?? '—'}</p>
+            <p style={{ fontSize: 12, color: '#71717a' }}>
+              Wallet ready: {auth.hasWallet ? 'yes' : 'no'}
+            </p>
             <button type="button" onClick={auth.logout}>
               Log out
             </button>
@@ -78,23 +110,58 @@ function TestPage() {
 
       {auth.isAuthenticated && (
         <>
+          {/* ---- 2. Vault Deposit ------------------------------------- */}
           <section style={{ marginBottom: 24 }}>
-            <h2>Funding</h2>
-            <button
-              type="button"
-              onClick={() => funding.fundAccount()}
-              disabled={funding.status === 'pending'}
-            >
-              {funding.status === 'pending' ? 'Opening funding…' : 'Fund account'}
-            </button>
-            {funding.error && <p style={{ color: '#f87171' }}>{funding.error}</p>}
-            {funding.status === 'success' && (
-              <p style={{ color: '#4ade80' }}>Funding flow completed.</p>
+            <h2>Vault Deposit</h2>
+            <p style={{ fontSize: 12, color: '#71717a' }}>
+              Contract: {depositContractAddress}
+            </p>
+
+            <label style={{ display: 'block', marginBottom: 8 }}>
+              Amount (ETH):{' '}
+              <input
+                type="text"
+                value={depositAmount}
+                onChange={(e) => setDepositAmount(e.target.value)}
+                style={{ padding: 6, width: 100 }}
+              />
+            </label>
+
+            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+              <button
+                type="button"
+                onClick={() => vault.deposit(valueWei)}
+                disabled={vault.status === 'depositing' || vault.status === 'funding'}
+              >
+                {vault.status === 'depositing' ? 'Confirming…' : 'Deposit from wallet'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => vault.fundAndDeposit(valueWei)}
+                disabled={vault.status === 'depositing' || vault.status === 'funding'}
+              >
+                {vault.status === 'funding'
+                  ? 'Funding…'
+                  : 'Buy & Deposit (MoonPay)'}
+              </button>
+            </div>
+
+            {vault.hash && <p>Tx: {vault.hash}</p>}
+            {vault.receipt && (
+              <p>Block: {vault.receipt.blockNumber.toString()}</p>
+            )}
+            {vault.status === 'success' && (
+              <p style={{ color: '#4ade80' }}>Deposit succeeded.</p>
+            )}
+            {vault.error && (
+              <p style={{ color: '#f87171' }}>{vault.error}</p>
             )}
           </section>
 
+          {/* ---- 3. Sign Message + Debug Submit ----------------------- */}
           <section style={{ marginBottom: 24 }}>
-            <h2>Test Validation</h2>
+            <h2>Sign Message</h2>
             <p style={{ fontSize: 12, color: '#71717a' }}>
               Server: {serverUrl || '— (set VITE_SERVER_URL)'}
             </p>
@@ -108,36 +175,24 @@ function TestPage() {
             <button
               type="button"
               onClick={handleSignAndSend}
-              disabled={validationStatus === 'pending' || !serverUrl || !validationMessage.trim()}
+              disabled={
+                submitStatus === 'pending' ||
+                signing.status === 'pending' ||
+                !serverUrl ||
+                !validationMessage.trim()
+              }
             >
-              {validationStatus === 'pending' ? 'Signing & sending…' : 'Sign & Send'}
+              {signing.status === 'pending'
+                ? 'Signing…'
+                : submitStatus === 'pending'
+                  ? 'Sending…'
+                  : 'Sign & Send to Backend'}
             </button>
-            {validationStatus === 'success' && (
+            {submitStatus === 'success' && (
               <p style={{ color: '#4ade80' }}>Validation succeeded.</p>
             )}
-            {validationError && (
-              <p style={{ color: '#f87171' }}>{validationError}</p>
-            )}
-          </section>
-
-          <section>
-            <h2>Deposit</h2>
-            <p style={{ fontSize: 12, color: '#71717a' }}>
-              Contract: {depositContractAddress}
-            </p>
-            <button
-              type="button"
-              onClick={() => deposit.deposit()}
-              disabled={deposit.status === 'pending'}
-            >
-              {deposit.status === 'pending' ? 'Confirming…' : 'Deposit'}
-            </button>
-            {deposit.hash && <p>Tx: {deposit.hash}</p>}
-            {deposit.receipt && (
-              <p>Block: {deposit.receipt.blockNumber.toString()}</p>
-            )}
-            {deposit.error && (
-              <p style={{ color: '#f87171' }}>{deposit.error}</p>
+            {submitError && (
+              <p style={{ color: '#f87171' }}>{submitError}</p>
             )}
           </section>
         </>
@@ -145,6 +200,10 @@ function TestPage() {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------------
+// App root
+// ---------------------------------------------------------------------------
 
 export default function App() {
   if (!appId) {

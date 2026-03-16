@@ -3,9 +3,10 @@ import { useAccount } from 'wagmi';
 
 /**
  * Auth and session state for the wallet SDK.
- * - login(): open Privy modal (email, socials, wallet per app config).
- * - logout(): disconnect and clear session.
- * - user, isReady, isAuthenticated, address for UI and guards.
+ *
+ * Login guarantees an embedded Ethereum wallet is created for users who
+ * authenticate via email / social (non-wallet) methods — this is enforced
+ * by the provider's config merge, not by consumer opt-in.
  */
 export function useWalletAuth() {
   const { ready, authenticated, user } = usePrivy();
@@ -28,5 +29,7 @@ export function useWalletAuth() {
     user,
     /** Active wallet address (wagmi or embedded) */
     address: walletAddress,
+    /** True when authenticated and a usable wallet address is available */
+    hasWallet: authenticated && !!walletAddress,
   };
 }

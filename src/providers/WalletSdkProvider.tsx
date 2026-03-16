@@ -7,16 +7,42 @@ import { createConfig, WagmiProvider } from '@privy-io/wagmi';
 import { getTransportsFromConfig } from '../config/chains';
 import type { WalletSdkConfig } from '../types/public';
 
+const SDK_EMBEDDED_WALLETS = {
+  ethereum: { createOnLogin: 'users-without-wallets' as const },
+  showWalletUIs: true,
+};
+
 const defaultPrivyConfig: PrivyClientConfig = {
   loginMethods: ['email', 'wallet', 'google', 'twitter', 'discord'],
-  embeddedWallets: {
-    ethereum: { createOnLogin: 'users-without-wallets' },
-    showWalletUIs: true,
-  },
+  embeddedWallets: SDK_EMBEDDED_WALLETS,
   appearance: {
     showWalletLoginFirst: false,
   },
 };
+
+/**
+ * Deep-merge consumer privyConfig on top of SDK defaults.
+ * Guarantees embedded-wallet auto-creation is preserved unless the consumer
+ * explicitly overrides `embeddedWallets.ethereum.createOnLogin`.
+ */
+function mergePrivyConfig(consumer?: Partial<PrivyClientConfig>): PrivyClientConfig {
+  if (!consumer) return defaultPrivyConfig;
+
+  const mergedEmbeddedWallets = {
+    ...SDK_EMBEDDED_WALLETS,
+    ...consumer.embeddedWallets,
+    ethereum: {
+      ...SDK_EMBEDDED_WALLETS.ethereum,
+      ...consumer.embeddedWallets?.ethereum,
+    },
+  };
+
+  return {
+    ...defaultPrivyConfig,
+    ...consumer,
+    embeddedWallets: mergedEmbeddedWallets,
+  } as PrivyClientConfig;
+}
 
 export interface WalletSdkProviderProps {
   config: WalletSdkConfig;
@@ -35,9 +61,8 @@ export function WalletSdkProvider({ config, children }: WalletSdkProviderProps) 
   }, [config.chains, config.rpcUrls]);
 
   const privyConfig = useMemo(
-    (): PrivyClientConfig =>
-      ({ ...defaultPrivyConfig, ...config.privyConfig } as PrivyClientConfig),
-    [config.privyConfig]
+    () => mergePrivyConfig(config.privyConfig as Partial<PrivyClientConfig> | undefined),
+    [config.privyConfig],
   );
 
   return (
