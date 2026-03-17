@@ -8,7 +8,7 @@ import { getTransportsFromConfig } from '../config/chains';
 import type { WalletSdkConfig } from '../types/public';
 
 const SDK_EMBEDDED_WALLETS = {
-  ethereum: { createOnLogin: 'users-without-wallets' as const },
+  ethereum: { createOnLogin: 'all-users' as const },
   showWalletUIs: false,
 };
 
