@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
+import { useOAuthTokens } from '@privy-io/react-auth';
 import {
   WalletSdkProvider,
   useWalletAuth,
@@ -48,6 +49,45 @@ function TestPage() {
   const [validationMessage, setValidationMessage] = useState('');
   const [submitStatus, setSubmitStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const googleTokenRef = useRef<string | null>(null);
+  const [profileData, setProfileData] = useState<unknown>(null);
+  const [profileStatus, setProfileStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  const { reauthorize } = useOAuthTokens({
+    onOAuthTokenGrant: ({ oAuthTokens }) => {
+      if (oAuthTokens.provider === 'google') {
+        googleTokenRef.current = oAuthTokens.accessToken;
+        setGoogleToken(oAuthTokens.accessToken);
+      }
+    },
+  });
+
+  const handleFetchProfile = async () => {
+    if (!serverUrl) return;
+    setProfileStatus('pending');
+    setProfileError(null);
+    try {
+      if (!googleTokenRef.current) {
+        await reauthorize({ provider: 'google' });
+      }
+      const token = googleTokenRef.current;
+      if (!token) throw new Error('Google token not available after reauthorization');
+
+      const res = await fetch(`${serverUrl}/builders/me`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+      setProfileData(await res.json());
+      setProfileStatus('success');
+    } catch (err) {
+      setProfileStatus('error');
+      setProfileError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   // -- Sign message via SDK, then POST to backend for debug verification --
   const handleSignAndSend = async () => {
@@ -107,6 +147,35 @@ function TestPage() {
           </div>
         )}
       </section>
+
+      {auth.isAuthenticated && auth.user?.google && (
+        <section style={{ marginBottom: 24 }}>
+          <h2>Profile</h2>
+          <p style={{ fontSize: 12, color: '#71717a' }}>
+            GET {serverUrl || '—'}/builders/me (Bearer: Google OAuth token)
+          </p>
+          <button
+            type="button"
+            onClick={handleFetchProfile}
+            disabled={profileStatus === 'pending'}
+          >
+            {profileStatus === 'pending' ? 'Loading…' : 'Profile'}
+          </button>
+          {!googleToken && profileStatus === 'idle' && (
+            <p style={{ fontSize: 12, color: '#71717a', marginTop: 4 }}>
+              Will request Google authorization if needed.
+            </p>
+          )}
+          {profileStatus === 'success' && profileData !== null && (
+            <pre style={{ marginTop: 8, padding: 8, background: '#27272a', color: '#e4e4e7', borderRadius: 4, overflow: 'auto', fontSize: 12 }}>
+              {JSON.stringify(profileData, null, 2)}
+            </pre>
+          )}
+          {profileError && (
+            <p style={{ color: '#f87171', marginTop: 8 }}>{profileError}</p>
+          )}
+        </section>
+      )}
 
       {auth.isAuthenticated && (
         <>
