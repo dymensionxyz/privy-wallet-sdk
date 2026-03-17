@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { useOAuthTokens } from '@privy-io/react-auth';
 import {
   WalletSdkProvider,
@@ -14,6 +14,7 @@ const appId = import.meta.env.VITE_PRIVY_APP_ID ?? '';
 const depositContractAddress = (import.meta.env.VITE_DEPOSIT_CONTRACT_ADDRESS ??
   '0x0000000000000000000000000000000000000000') as `0x${string}`;
 const serverUrl = (import.meta.env.VITE_SERVER_URL ?? '').replace(/\/$/, '');
+const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '';
 
 const VAULT_ABI = [
   {
@@ -71,19 +72,35 @@ function TestPage() {
     setProfileError(null);
     try {
       if (!googleTokenRef.current) {
+        console.debug('[Profile] No cached Google token, requesting reauthorization…');
         await reauthorize({ provider: 'google' });
       }
       const token = googleTokenRef.current;
+      console.debug('[Profile] Google token present:', !!token);
+      console.debug('[Profile] Token preview:', token ? `${token.slice(0, 20)}…(${token.length} chars)` : 'null');
       if (!token) throw new Error('Google token not available after reauthorization');
 
-      const res = await fetch(`${serverUrl}/builders/me`, {
+      const url = `${serverUrl}/api/builders/me`;
+      console.debug('[Profile] GET', url);
+      console.debug('[Profile] Authorization header:', `Bearer ${token.slice(0, 20)}…`);
+
+      const res = await fetch(url, {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
-      setProfileData(await res.json());
+
+      console.debug('[Profile] Response status:', res.status, res.statusText);
+      if (!res.ok) {
+        const body = await res.text();
+        console.error('[Profile] Error body:', body);
+        throw new Error(body || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      console.debug('[Profile] Success payload:', data);
+      setProfileData(data);
       setProfileStatus('success');
     } catch (err) {
+      console.error('[Profile] Fetch failed:', err);
       setProfileStatus('error');
       setProfileError(err instanceof Error ? err.message : String(err));
     }
@@ -123,7 +140,7 @@ function TestPage() {
   })();
 
   return (
-    <div style={{ padding: 24, maxWidth: 480, margin: '0 auto' }}>
+    <div>
       <h1>Wallet SDK Test Page</h1>
 
       {/* ---- 1. Auth -------------------------------------------------- */}
@@ -271,6 +288,156 @@ function TestPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Vanilla Google Login (no Privy) — uses Google Identity Services directly
+// ---------------------------------------------------------------------------
+
+function VanillaGoogleLogin() {
+  const [idToken, setIdToken] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const initializedRef = useRef(false);
+  const buttonRef = useRef<HTMLDivElement | null>(null);
+
+  const [profileData, setProfileData] = useState<unknown>(null);
+  const [profileStatus, setProfileStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  const handleCredential = useCallback((response: CredentialResponse) => {
+    const jwt = response.credential;
+    console.debug('[VanillaGoogle] ID token (JWT) received:', `${jwt.slice(0, 20)}…(${jwt.length} chars)`);
+
+    // Decode the JWT payload to extract the email (no verification needed client-side)
+    try {
+      const payload = JSON.parse(atob(jwt.split('.')[1]));
+      console.debug('[VanillaGoogle] JWT payload:', payload);
+      setUserEmail(payload.email ?? null);
+    } catch {
+      console.warn('[VanillaGoogle] Could not decode JWT payload');
+    }
+
+    setIdToken(jwt);
+    setLoginError(null);
+  }, []);
+
+  const initGsi = useCallback((node: HTMLDivElement | null) => {
+    buttonRef.current = node;
+    if (!node || initializedRef.current || !googleClientId) return;
+    if (typeof google === 'undefined') return;
+
+    google.accounts.id.initialize({
+      client_id: googleClientId,
+      callback: handleCredential,
+    });
+    google.accounts.id.renderButton(node, {
+      type: 'standard',
+      theme: 'outline',
+      size: 'large',
+      text: 'signin_with',
+    });
+    initializedRef.current = true;
+  }, [handleCredential]);
+
+  const handleLogout = () => {
+    if (userEmail) {
+      google.accounts.id.disableAutoSelect();
+    }
+    setIdToken(null);
+    setUserEmail(null);
+    setProfileData(null);
+    setProfileStatus('idle');
+    setProfileError(null);
+    initializedRef.current = false;
+  };
+
+  const handleFetchProfile = async () => {
+    if (!serverUrl || !idToken) return;
+    setProfileStatus('pending');
+    setProfileError(null);
+    try {
+      const url = `${serverUrl}/api/builders/me`;
+      console.debug('[VanillaGoogle] GET', url);
+      console.debug('[VanillaGoogle] ID token preview:', `${idToken.slice(0, 20)}…(${idToken.length} chars)`);
+      console.debug('[VanillaGoogle] Authorization header:', `Bearer ${idToken.slice(0, 20)}…`);
+
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+
+      console.debug('[VanillaGoogle] Response status:', res.status, res.statusText);
+      if (!res.ok) {
+        const body = await res.text();
+        console.error('[VanillaGoogle] Error body:', body);
+        throw new Error(body || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      console.debug('[VanillaGoogle] Success payload:', data);
+      setProfileData(data);
+      setProfileStatus('success');
+    } catch (err) {
+      console.error('[VanillaGoogle] Fetch failed:', err);
+      setProfileStatus('error');
+      setProfileError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  if (!googleClientId) {
+    return (
+      <section style={{ marginBottom: 24, padding: 16, border: '1px solid #3f3f46', borderRadius: 8 }}>
+        <h2>Vanilla Google Login (no Privy)</h2>
+        <p style={{ fontSize: 12, color: '#71717a' }}>
+          Set VITE_GOOGLE_CLIENT_ID in .env to enable.
+        </p>
+      </section>
+    );
+  }
+
+  return (
+    <section style={{ marginBottom: 24, padding: 16, border: '1px solid #3f3f46', borderRadius: 8 }}>
+      <h2>Vanilla Google Login (no Privy)</h2>
+      <p style={{ fontSize: 12, color: '#71717a', marginBottom: 8 }}>
+        Uses Google Identity Services directly — ID token (JWT) sent to {serverUrl || '—'}/api/builders/me
+      </p>
+
+      {!idToken ? (
+        <div ref={initGsi} />
+      ) : (
+        <div>
+          <p>Signed in{userEmail ? `: ${userEmail}` : ''}</p>
+          <p style={{ fontSize: 12, color: '#71717a' }}>
+            ID token: {idToken.slice(0, 24)}…
+          </p>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={handleFetchProfile}
+              disabled={profileStatus === 'pending' || !serverUrl}
+            >
+              {profileStatus === 'pending' ? 'Loading…' : 'Fetch Profile'}
+            </button>
+            <button type="button" onClick={handleLogout}>
+              Log out
+            </button>
+          </div>
+        </div>
+      )}
+
+      {profileStatus === 'success' && profileData !== null && (
+        <pre style={{ marginTop: 8, padding: 8, background: '#27272a', color: '#e4e4e7', borderRadius: 4, overflow: 'auto', fontSize: 12 }}>
+          {JSON.stringify(profileData, null, 2)}
+        </pre>
+      )}
+      {profileError && (
+        <p style={{ color: '#f87171', marginTop: 8 }}>{profileError}</p>
+      )}
+      {loginError && (
+        <p style={{ color: '#f87171', marginTop: 8 }}>{loginError}</p>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // App root
 // ---------------------------------------------------------------------------
 
@@ -284,8 +451,11 @@ export default function App() {
   }
 
   return (
-    <WalletSdkProvider config={sdkConfig}>
-      <TestPage />
-    </WalletSdkProvider>
+    <div style={{ padding: 24, maxWidth: 480, margin: '0 auto' }}>
+      <VanillaGoogleLogin />
+      <WalletSdkProvider config={sdkConfig}>
+        <TestPage />
+      </WalletSdkProvider>
+    </div>
   );
 }
