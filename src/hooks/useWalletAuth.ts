@@ -1,4 +1,6 @@
-import { useLogin, useLogout, usePrivy } from '@privy-io/react-auth';
+import { useEffect } from 'react';
+import { useLogin, useLogout, usePrivy, useWallets } from '@privy-io/react-auth';
+import { useSetActiveWallet } from '@privy-io/wagmi';
 import { useAccount } from 'wagmi';
 
 /**
@@ -13,6 +15,19 @@ export function useWalletAuth() {
   const { login } = useLogin();
   const { logout } = useLogout();
   const { address } = useAccount();
+  const { wallets } = useWallets();
+  const { setActiveWallet } = useSetActiveWallet();
+
+  useEffect(() => {
+    if (!authenticated || wallets.length === 0) return;
+
+    const embeddedWallet = wallets.find(
+      (wallet) => wallet.walletClientType === 'privy',
+    );
+    if (embeddedWallet) {
+      setActiveWallet(embeddedWallet);
+    }
+  }, [authenticated, wallets, setActiveWallet]);
 
   const walletAddress = address ?? (user?.wallet?.address as `0x${string}` | undefined);
 

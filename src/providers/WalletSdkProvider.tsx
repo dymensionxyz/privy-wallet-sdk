@@ -9,7 +9,7 @@ import type { WalletSdkConfig } from '../types/public';
 
 const SDK_EMBEDDED_WALLETS = {
   ethereum: { createOnLogin: 'users-without-wallets' as const },
-  showWalletUIs: true,
+  showWalletUIs: false,
 };
 
 const defaultPrivyConfig: PrivyClientConfig = {
