@@ -56,8 +56,9 @@ describe('WalletSdkProvider', () => {
 
     const embedded = capturedPrivyConfig?.embeddedWallets as Record<string, unknown> | undefined;
     expect(embedded).toBeDefined();
+    // Consumer only overrides appearance; SDK default 'all-users' must be preserved.
     expect((embedded?.ethereum as Record<string, unknown>)?.createOnLogin).toBe(
-      'users-without-wallets',
+      'all-users',
     );
   });
 

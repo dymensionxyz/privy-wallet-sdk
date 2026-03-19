@@ -1,4 +1,5 @@
 export { WalletSdkProvider } from './providers/WalletSdkProvider';
+export { createWalletSdkConfig } from './config/defaults';
 export { useWalletAuth } from './hooks/useWalletAuth';
 export { useAccountFunding } from './hooks/useAccountFunding';
 export { useDeposit } from './hooks/useDeposit';
@@ -19,5 +20,6 @@ export type {
   VaultDepositResult,
   SigningStatus,
   SigningResult,
+  SignMessageOptions,
 } from './types/public';
 export { WalletSdkError } from './utils/errors';

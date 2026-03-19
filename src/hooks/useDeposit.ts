@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import type { Abi } from 'viem';
 import type { DepositResult, DepositStatus } from '../types/public';
 import { normalizeError } from '../utils/errors';
 
@@ -17,6 +18,10 @@ const DEPOSIT_ABI = [
 export interface UseDepositOptions {
   /** Contract address that implements deposit() */
   contractAddress: `0x${string}`;
+  /** Override ABI (defaults to a payable deposit() stub). */
+  abi?: Abi;
+  /** Override function name to call (defaults to 'deposit'). */
+  functionName?: string;
 }
 
 /**
@@ -25,7 +30,7 @@ export interface UseDepositOptions {
  * - status, result, error for UI and receipt.
  */
 export function useDeposit(options: UseDepositOptions) {
-  const { contractAddress } = options;
+  const { contractAddress, abi: abiOverride, functionName: functionNameOverride } = options;
 
   const [status, setStatus] = useState<DepositStatus>('idle');
   const [result, setResult] = useState<DepositResult | null>(null);
@@ -80,8 +85,8 @@ export function useDeposit(options: UseDepositOptions) {
       try {
         await writeContract({
           address: contractAddress,
-          abi: DEPOSIT_ABI,
-          functionName: 'deposit',
+          abi: (abiOverride ?? DEPOSIT_ABI) as Abi,
+          functionName: functionNameOverride ?? 'deposit',
           ...(valueWei !== undefined && valueWei !== null && { value: valueWei }),
         });
       } catch (e) {
@@ -89,7 +94,7 @@ export function useDeposit(options: UseDepositOptions) {
         setResult({ error: e instanceof Error ? e : new Error(normalizeError(e)) });
       }
     },
-    [contractAddress, writeContract, resetWrite]
+    [contractAddress, abiOverride, functionNameOverride, writeContract, resetWrite]
   );
 
   const reset = useCallback(() => {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useAccount } from 'wagmi';
+import { useAccount, useConfig } from 'wagmi';
 import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { getBalance } from 'wagmi/actions';
 import { useFundWallet } from '@privy-io/react-auth';
 import type { Chain } from 'viem';
 import type {
@@ -31,12 +32,14 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
   const { contract } = options;
 
   const { address } = useAccount();
+  const wagmiConfig = useConfig();
   const [status, setStatus] = useState<VaultDepositStatus>('idle');
   const [result, setResult] = useState<VaultDepositResult | null>(null);
 
   // Track whether we should auto-deposit after funding completes.
   const pendingDepositValue = useRef<bigint | undefined>(undefined);
   const awaitingFunding = useRef(false);
+  const preFundBalance = useRef<bigint>(0n);
 
   // --- contract write -------------------------------------------------
   const {
@@ -101,9 +104,26 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
 
   // --- funding --------------------------------------------------------
   const { fundWallet } = useFundWallet({
-    onUserExited() {
-      if (awaitingFunding.current) {
-        awaitingFunding.current = false;
+    onUserExited: async () => {
+      if (!awaitingFunding.current) return;
+      awaitingFunding.current = false;
+
+      // Only proceed with the deposit if the balance actually increased,
+      // which distinguishes a completed funding from a dismissed modal.
+      const currentAddress = address;
+      if (!currentAddress) {
+        setStatus('idle');
+        return;
+      }
+      try {
+        const postBal = await getBalance(wagmiConfig, { address: currentAddress });
+        if (postBal.value > preFundBalance.current) {
+          execDeposit(pendingDepositValue.current);
+        } else {
+          setStatus('idle');
+        }
+      } catch {
+        // If balance check fails, fall back to attempting the deposit
         execDeposit(pendingDepositValue.current);
       }
     },
@@ -135,6 +155,13 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
       awaitingFunding.current = true;
 
       try {
+        const bal = await getBalance(wagmiConfig, { address: targetAddress });
+        preFundBalance.current = bal.value;
+      } catch {
+        preFundBalance.current = 0n;
+      }
+
+      try {
         await fundWallet({
           address: targetAddress,
           ...(fundingOptions && {
@@ -156,7 +183,7 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
         setResult({ error: e instanceof Error ? e : new Error(normalizeError(e)) });
       }
     },
-    [address, fundWallet],
+    [address, fundWallet, wagmiConfig],
   );
 
   // --- reset ----------------------------------------------------------

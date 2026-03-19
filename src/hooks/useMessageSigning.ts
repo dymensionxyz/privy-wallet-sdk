@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import { useSignMessage as useWagmiSignMessage } from 'wagmi';
-import type { SigningResult, SigningStatus } from '../types/public';
+import type { SigningResult, SigningStatus, SignMessageOptions } from '../types/public';
 import { normalizeError } from '../utils/errors';
 
 /**
@@ -18,7 +18,8 @@ export function useMessageSigning() {
   const [result, setResult] = useState<SigningResult | null>(null);
 
   const signMessage = useCallback(
-    async (message: string): Promise<`0x${string}` | undefined> => {
+    async (message: string, options?: SignMessageOptions): Promise<`0x${string}` | undefined> => {
+      const shouldThrow = options?.throwOnError ?? true;
       setResult(null);
       setStatus('pending');
       try {
@@ -30,6 +31,7 @@ export function useMessageSigning() {
         const error = e instanceof Error ? e : new Error(normalizeError(e));
         setResult({ error });
         setStatus('error');
+        if (shouldThrow) throw error;
         return undefined;
       }
     },

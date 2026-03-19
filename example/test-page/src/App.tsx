@@ -113,7 +113,6 @@ function TestPage() {
     setSubmitError(null);
     try {
       const signature = await signing.signMessage(validationMessage);
-      if (!signature) throw new Error(signing.error ?? 'Signing failed');
 
       const res = await fetch(`${serverUrl}/testvalidation`, {
         method: 'POST',

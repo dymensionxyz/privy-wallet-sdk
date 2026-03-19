@@ -7,6 +7,14 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   clean: true,
-  external: ['react', 'react-dom'],
+  external: [
+    'react',
+    'react-dom',
+    'wagmi',
+    'viem',
+    '@privy-io/react-auth',
+    '@privy-io/wagmi',
+    '@tanstack/react-query',
+  ],
   treeshake: true,
 });

@@ -3,13 +3,19 @@ import { renderHook, act } from '@testing-library/react';
 import { useVaultDeposit } from '../hooks/useVaultDeposit';
 import type { VaultContractConfig } from '../types/public';
 
-const writeContractMock = vi.fn();
-const resetWriteMock = vi.fn();
-const fundWalletMock = vi.fn();
+// vi.hoisted ensures these are initialised before the hoisted vi.mock factories run.
+const { writeContractMock, resetWriteMock, fundWalletMock, getBalanceMock } = vi.hoisted(() => ({
+  writeContractMock: vi.fn(),
+  resetWriteMock: vi.fn(),
+  fundWalletMock: vi.fn(),
+  getBalanceMock: vi.fn(),
+}));
+
 let onUserExitedCb: (() => void) | undefined;
 
 vi.mock('wagmi', () => ({
   useAccount: () => ({ address: '0x1234' as `0x${string}` }),
+  useConfig: () => ({}),
   useWriteContract: () => ({
     writeContract: writeContractMock,
     data: undefined,
@@ -18,6 +24,10 @@ vi.mock('wagmi', () => ({
     reset: resetWriteMock,
   }),
   useWaitForTransactionReceipt: () => ({ data: undefined }),
+}));
+
+vi.mock('wagmi/actions', () => ({
+  getBalance: getBalanceMock,
 }));
 
 vi.mock('@privy-io/react-auth', () => ({
@@ -46,6 +56,7 @@ describe('useVaultDeposit', () => {
     writeContractMock.mockReset();
     resetWriteMock.mockReset();
     fundWalletMock.mockReset();
+    getBalanceMock.mockReset();
     onUserExitedCb = undefined;
   });
 
@@ -73,9 +84,13 @@ describe('useVaultDeposit', () => {
     );
   });
 
-  it('fundAndDeposit() opens funding and triggers deposit on exit', async () => {
+  it('fundAndDeposit() triggers deposit when balance increases after funding', async () => {
     fundWalletMock.mockResolvedValue(undefined);
     writeContractMock.mockResolvedValue(undefined);
+    // Pre-fund balance: 100n, post-fund balance: 200n → deposit proceeds
+    getBalanceMock
+      .mockResolvedValueOnce({ value: 100n })  // pre-fund
+      .mockResolvedValueOnce({ value: 200n }); // post-fund
 
     const { result } = renderHook(() => useVaultDeposit({ contract }));
 
@@ -88,14 +103,36 @@ describe('useVaultDeposit', () => {
     );
     expect(result.current.status).toBe('funding');
 
-    // Simulate Privy modal close
+    // Simulate Privy modal close after successful funding
     await act(async () => {
-      onUserExitedCb?.();
+      await onUserExitedCb?.();
     });
 
     expect(writeContractMock).toHaveBeenCalledWith(
       expect.objectContaining({ value: 50n }),
     );
+  });
+
+  it('fundAndDeposit() skips deposit when user cancels without funding', async () => {
+    fundWalletMock.mockResolvedValue(undefined);
+    // Pre-fund and post-fund balance are the same → user cancelled
+    getBalanceMock.mockResolvedValue({ value: 100n });
+
+    const { result } = renderHook(() => useVaultDeposit({ contract }));
+
+    await act(async () => {
+      await result.current.fundAndDeposit(50n);
+    });
+
+    expect(result.current.status).toBe('funding');
+
+    // Simulate Privy modal dismissed without completing purchase
+    await act(async () => {
+      await onUserExitedCb?.();
+    });
+
+    expect(writeContractMock).not.toHaveBeenCalled();
+    expect(result.current.status).toBe('idle');
   });
 
   it('fundAndDeposit() errors when no wallet is connected', async () => {

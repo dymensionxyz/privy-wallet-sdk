@@ -37,14 +37,33 @@ describe('useMessageSigning', () => {
     expect(result.current.error).toBeNull();
   });
 
-  it('handles signing failure', async () => {
+  it('throws on signing failure by default', async () => {
+    signMessageAsyncMock.mockRejectedValue(new Error('user rejected'));
+
+    const { result } = renderHook(() => useMessageSigning());
+
+    let caughtError: Error | undefined;
+    await act(async () => {
+      try {
+        await result.current.signMessage('hello');
+      } catch (e) {
+        caughtError = e as Error;
+      }
+    });
+
+    expect(caughtError?.message).toBe('user rejected');
+    expect(result.current.status).toBe('error');
+    expect(result.current.error).toBe('user rejected');
+  });
+
+  it('returns undefined on failure when throwOnError is false', async () => {
     signMessageAsyncMock.mockRejectedValue(new Error('user rejected'));
 
     const { result } = renderHook(() => useMessageSigning());
 
     let returned: `0x${string}` | undefined;
     await act(async () => {
-      returned = await result.current.signMessage('hello');
+      returned = await result.current.signMessage('hello', { throwOnError: false });
     });
 
     expect(returned).toBeUndefined();

@@ -8,8 +8,6 @@ export interface WalletSdkConfig {
   chains: [Chain, ...Chain[]];
   /** Optional: custom RPC URLs per chain id */
   rpcUrls?: Partial<Record<number, string>>;
-  /** Deposit contract address (for useDeposit) */
-  depositContractAddress?: `0x${string}`;
   /** Optional Privy client config (login methods, appearance, etc.) */
   privyConfig?: PrivyClientConfigLike;
 }
@@ -80,6 +78,12 @@ export interface VaultDepositResult {
 // ---------------------------------------------------------------------------
 // Message signing (useMessageSigning)
 // ---------------------------------------------------------------------------
+
+/** Options for signMessage */
+export interface SignMessageOptions {
+  /** When true (default), signMessage throws on failure instead of returning undefined. */
+  throwOnError?: boolean;
+}
 
 /** Status for the message signing hook */
 export type SigningStatus = 'idle' | 'pending' | 'success' | 'error';
