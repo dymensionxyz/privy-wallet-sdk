@@ -6,31 +6,13 @@ import {
   useVaultDeposit,
   useMessageSigning,
 } from 'privy-wallet-sdk';
-import type { VaultContractConfig } from 'privy-wallet-sdk';
+import type { FundAccountOptions } from 'privy-wallet-sdk';
 import { sepolia } from 'viem/chains';
 import { parseEther } from 'viem';
 
 const appId = import.meta.env.VITE_PRIVY_APP_ID ?? '';
-const depositContractAddress = (import.meta.env.VITE_DEPOSIT_CONTRACT_ADDRESS ??
-  '0x0000000000000000000000000000000000000000') as `0x${string}`;
 const serverUrl = (import.meta.env.VITE_SERVER_URL ?? '').replace(/\/$/, '');
 const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '';
-
-const VAULT_ABI = [
-  {
-    name: 'deposit',
-    type: 'function' as const,
-    stateMutability: 'payable' as const,
-    inputs: [],
-    outputs: [],
-  },
-];
-
-const vaultContract: VaultContractConfig = {
-  address: depositContractAddress,
-  abi: VAULT_ABI,
-  functionName: 'deposit',
-};
 
 const sdkConfig = {
   appId,
@@ -41,12 +23,16 @@ const sdkConfig = {
 // Test page inner component (must be inside WalletSdkProvider)
 // ---------------------------------------------------------------------------
 
+type FundingAsset = 'native-currency' | 'USDC';
+
 function TestPage() {
   const auth = useWalletAuth();
-  const vault = useVaultDeposit({ contract: vaultContract });
+  // Phase 1: no vault contract — deposit actions fund the embedded wallet directly.
+  const vault = useVaultDeposit();
   const signing = useMessageSigning();
 
   const [depositAmount, setDepositAmount] = useState('0.001');
+  const [fundingAsset, setFundingAsset] = useState<FundingAsset>('native-currency');
   const [validationMessage, setValidationMessage] = useState('');
   const [submitStatus, setSubmitStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -138,6 +124,11 @@ function TestPage() {
     try { return parseEther(depositAmount || '0'); } catch { return undefined; }
   })();
 
+  const fundingOptions: FundAccountOptions = {
+    asset: fundingAsset,
+    amount: depositAmount || undefined,
+  };
+
   return (
     <div>
       <h1>Wallet SDK Test Page</h1>
@@ -195,49 +186,56 @@ function TestPage() {
 
       {auth.isAuthenticated && (
         <>
-          {/* ---- 2. Vault Deposit ------------------------------------- */}
+          {/* ---- 2. Fund Account ------------------------------------- */}
           <section style={{ marginBottom: 24 }}>
-            <h2>Vault Deposit</h2>
+            <h2>Fund Account</h2>
             <p style={{ fontSize: 12, color: '#71717a' }}>
-              Contract: {depositContractAddress}
+              Phase 1: funds go directly into the embedded wallet (no vault contract).
             </p>
 
-            <label style={{ display: 'block', marginBottom: 8 }}>
-              Amount (ETH):{' '}
-              <input
-                type="text"
-                value={depositAmount}
-                onChange={(e) => setDepositAmount(e.target.value)}
-                style={{ padding: 6, width: 100 }}
-              />
-            </label>
+            <div style={{ display: 'flex', gap: 16, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <label>
+                Asset:{' '}
+                <select
+                  value={fundingAsset}
+                  onChange={(e) => setFundingAsset(e.target.value as FundingAsset)}
+                  style={{ padding: 4 }}
+                >
+                  <option value="native-currency">ETH</option>
+                  <option value="USDC">USDC</option>
+                </select>
+              </label>
+
+              <label>
+                Amount:{' '}
+                <input
+                  type="text"
+                  value={depositAmount}
+                  onChange={(e) => setDepositAmount(e.target.value)}
+                  placeholder={fundingAsset === 'USDC' ? 'e.g. 10' : 'e.g. 0.001'}
+                  style={{ padding: 6, width: 100 }}
+                />
+              </label>
+            </div>
 
             <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
               <button
                 type="button"
-                onClick={() => vault.deposit(valueWei)}
-                disabled={vault.status === 'depositing' || vault.status === 'funding'}
+                onClick={() => vault.fundAndDeposit(fundingAsset === 'native-currency' ? valueWei : undefined, fundingOptions)}
+                disabled={vault.status === 'funding'}
               >
-                {vault.status === 'depositing' ? 'Confirming…' : 'Deposit from wallet'}
+                {vault.status === 'funding' ? 'Funding…' : `Fund with ${fundingAsset === 'USDC' ? 'USDC' : 'ETH'}`}
               </button>
 
-              <button
-                type="button"
-                onClick={() => vault.fundAndDeposit(valueWei)}
-                disabled={vault.status === 'depositing' || vault.status === 'funding'}
-              >
-                {vault.status === 'funding'
-                  ? 'Funding…'
-                  : 'Buy & Deposit (MoonPay)'}
-              </button>
+              {vault.status !== 'idle' && (
+                <button type="button" onClick={vault.reset}>
+                  Reset
+                </button>
+              )}
             </div>
 
-            {vault.hash && <p>Tx: {vault.hash}</p>}
-            {vault.receipt && (
-              <p>Block: {vault.receipt.blockNumber.toString()}</p>
-            )}
             {vault.status === 'success' && (
-              <p style={{ color: '#4ade80' }}>Deposit succeeded.</p>
+              <p style={{ color: '#4ade80' }}>Wallet funded successfully.</p>
             )}
             {vault.error && (
               <p style={{ color: '#f87171' }}>{vault.error}</p>

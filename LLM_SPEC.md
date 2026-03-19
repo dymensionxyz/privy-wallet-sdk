@@ -41,7 +41,7 @@ All env vars use the `VITE_` prefix (Vite projects). Adapt to your bundler if ne
 | Variable | Required | Description |
 |---|---|---|
 | `VITE_PRIVY_APP_ID` | **yes** | Privy app ID from https://dashboard.privy.io |
-| `VITE_DEPOSIT_CONTRACT_ADDRESS` | no | Vault contract address; defaults to zero address |
+| `VITE_DEPOSIT_CONTRACT_ADDRESS` | no | Vault contract address (phase 2 only); not needed for direct wallet funding |
 | `VITE_SERVER_URL` | no | Backend base URL for signature verification (e.g. `http://localhost:8080`) |
 | `VITE_RPC_URL_SEPOLIA` | no | Custom RPC for Sepolia (Alchemy, Infura, …) |
 | `VITE_RPC_URL_MAINNET` | no | Custom RPC for Mainnet |
@@ -154,15 +154,20 @@ function AuthGate() {
 
 ---
 
-### 4.2 `useVaultDeposit(options)`
+### 4.2 `useVaultDeposit(options?)`
 
-High-level vault deposit hook. Orchestrates both deposit paths with a single shared status model.
+High-level deposit hook. Orchestrates both deposit paths with a single shared status model.
+
+The `contract` field is **optional**:
+
+- **Phase 1 (no contract)**: `deposit()` and `fundAndDeposit()` open Privy's funding modal and succeed once the wallet balance increases. No on-chain contract call is made.
+- **Phase 2 (contract provided)**: `deposit()` calls the vault contract directly from the existing wallet balance; `fundAndDeposit()` funds first, then calls the vault contract.
 
 #### Options
 
 ```ts
 interface UseVaultDepositOptions {
-  contract: VaultContractConfig;
+  contract?: VaultContractConfig;  // omit for phase 1 (direct wallet funding)
 }
 
 interface VaultContractConfig {
@@ -177,7 +182,7 @@ interface VaultContractConfig {
 
 ```ts
 {
-  deposit:        (valueWei?: bigint) => Promise<void>;
+  deposit:        (valueWei?: bigint, fundingOptions?: FundAccountOptions) => Promise<void>;
   fundAndDeposit: (valueWei?: bigint, fundingOptions?: FundAccountOptions) => Promise<void>;
   status:         VaultDepositStatus;
   result:         VaultDepositResult | null;
@@ -190,21 +195,60 @@ interface VaultContractConfig {
 
 #### Status state machine
 
+**Phase 1 (no contract)**
+```
+idle ──► funding ──► success
+  └───────────────► error
+```
+
+**Phase 2 (contract provided)**
 ```
 idle ──► funding ──► depositing ──► success
+  │                  └─────────────► error
   └──────────────────────────────► error
-                    └─────────────► error
 ```
 
 | Value | Meaning |
 |---|---|
 | `idle` | No operation in progress |
-| `funding` | Privy funding modal is open (only during `fundAndDeposit`) |
-| `depositing` | Contract write in flight / waiting for wallet confirmation |
-| `success` | Receipt confirmed on-chain |
+| `funding` | Privy funding modal is open |
+| `depositing` | Contract write in flight / waiting for wallet confirmation (phase 2 only) |
+| `success` | Funding confirmed (phase 1) or receipt confirmed on-chain (phase 2) |
 | `error` | Any phase failed |
 
-#### Usage pattern
+#### Usage pattern — Phase 1 (direct wallet funding, no vault)
+
+```tsx
+import { useVaultDeposit } from 'privy-wallet-sdk';
+
+function FundAccountUI() {
+  const { fundAndDeposit, status, error, reset } = useVaultDeposit();
+  // or: useVaultDeposit({})  — both are equivalent
+
+  return (
+    <div>
+      <button
+        onClick={() => fundAndDeposit(undefined, { asset: 'native-currency' })}
+        disabled={status === 'funding'}
+      >
+        {status === 'funding' ? 'Funding…' : 'Fund with ETH'}
+      </button>
+      <button
+        onClick={() => fundAndDeposit(undefined, { asset: 'USDC' })}
+        disabled={status === 'funding'}
+      >
+        Fund with USDC
+      </button>
+
+      {status === 'success' && <p>Wallet funded!</p>}
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+      {status !== 'idle' && <button onClick={reset}>Reset</button>}
+    </div>
+  );
+}
+```
+
+#### Usage pattern — Phase 2 (vault contract deposit)
 
 ```tsx
 import { useVaultDeposit } from 'privy-wallet-sdk';
@@ -494,6 +538,8 @@ vault.deposit(valueWei);
 
 ## 9. Complete Minimal Example
 
+### Phase 1 — Direct wallet funding (no vault)
+
 ```tsx
 // main.tsx
 import React from 'react';
@@ -510,20 +556,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 ```
 
 ```tsx
-// App.tsx
+// App.tsx — Phase 1: fund the embedded wallet directly, no vault contract needed
 import { useWalletAuth, useVaultDeposit, useMessageSigning } from 'privy-wallet-sdk';
-import type { VaultContractConfig } from 'privy-wallet-sdk';
-import { parseEther } from 'viem';
-
-const vaultContract: VaultContractConfig = {
-  address: import.meta.env.VITE_DEPOSIT_CONTRACT_ADDRESS as `0x${string}`,
-  abi: [{ name: 'deposit', type: 'function', stateMutability: 'payable', inputs: [], outputs: [] }],
-  functionName: 'deposit',
-};
 
 export default function App() {
   const auth = useWalletAuth();
-  const vault = useVaultDeposit({ contract: vaultContract });
+  const funding = useVaultDeposit();  // no contract → phase 1 mode
   const signing = useMessageSigning();
 
   if (!auth.isReady) return <p>Loading…</p>;
@@ -540,19 +578,19 @@ export default function App() {
       <hr />
 
       <button
-        onClick={() => vault.deposit(parseEther('0.01'))}
-        disabled={vault.status !== 'idle'}
+        onClick={() => funding.fundAndDeposit(undefined, { asset: 'native-currency' })}
+        disabled={funding.status === 'funding'}
       >
-        Deposit 0.01 ETH
+        {funding.status === 'funding' ? 'Funding…' : 'Fund with ETH'}
       </button>
       <button
-        onClick={() => vault.fundAndDeposit(parseEther('0.01'))}
-        disabled={vault.status !== 'idle'}
+        onClick={() => funding.fundAndDeposit(undefined, { asset: 'USDC' })}
+        disabled={funding.status === 'funding'}
       >
-        Buy & Deposit
+        Fund with USDC
       </button>
-      {vault.error && <p style={{ color: 'red' }}>{vault.error}</p>}
-      {vault.status === 'success' && <p>Deposit confirmed in block {vault.receipt?.blockNumber.toString()}</p>}
+      {funding.status === 'success' && <p>Wallet funded!</p>}
+      {funding.error && <p style={{ color: 'red' }}>{funding.error}</p>}
 
       <hr />
 
@@ -567,4 +605,29 @@ export default function App() {
     </div>
   );
 }
+```
+
+### Phase 2 — Vault contract deposit (future)
+
+When a vault contract is available, pass it to `useVaultDeposit` to unlock direct on-chain deposits:
+
+```tsx
+import { useVaultDeposit } from 'privy-wallet-sdk';
+import type { VaultContractConfig } from 'privy-wallet-sdk';
+import { parseEther } from 'viem';
+
+// Define outside component for a stable reference.
+const vaultContract: VaultContractConfig = {
+  address: import.meta.env.VITE_DEPOSIT_CONTRACT_ADDRESS as `0x${string}`,
+  abi: [{ name: 'deposit', type: 'function', stateMutability: 'payable', inputs: [], outputs: [] }],
+  functionName: 'deposit',
+};
+
+// Inside your component:
+const vault = useVaultDeposit({ contract: vaultContract });
+
+// deposit() calls the contract from existing balance;
+// fundAndDeposit() funds the wallet first, then calls the contract.
+vault.deposit(parseEther('0.01'));
+vault.fundAndDeposit(parseEther('0.01'));
 ```

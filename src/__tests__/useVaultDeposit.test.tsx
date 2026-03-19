@@ -170,4 +170,96 @@ describe('useVaultDeposit', () => {
     expect(result.current.error).toBeNull();
     expect(result.current.hash).toBeUndefined();
   });
+
+  // ---------------------------------------------------------------------------
+  // Phase 1: no contract — direct wallet funding
+  // ---------------------------------------------------------------------------
+
+  describe('phase 1 (no contract)', () => {
+    it('starts in idle state', () => {
+      const { result } = renderHook(() => useVaultDeposit());
+      expect(result.current.status).toBe('idle');
+      expect(result.current.error).toBeNull();
+    });
+
+    it('fundAndDeposit() succeeds without calling writeContract when balance increases', async () => {
+      fundWalletMock.mockResolvedValue(undefined);
+      getBalanceMock
+        .mockResolvedValueOnce({ value: 100n })   // pre-fund
+        .mockResolvedValueOnce({ value: 300n });  // post-fund
+
+      const { result } = renderHook(() => useVaultDeposit());
+
+      await act(async () => {
+        await result.current.fundAndDeposit();
+      });
+
+      expect(fundWalletMock).toHaveBeenCalledWith(
+        expect.objectContaining({ address: '0x1234' }),
+      );
+
+      await act(async () => {
+        await onUserExitedCb?.();
+      });
+
+      expect(writeContractMock).not.toHaveBeenCalled();
+      expect(result.current.status).toBe('success');
+    });
+
+    it('fundAndDeposit() returns to idle when user cancels without funding', async () => {
+      fundWalletMock.mockResolvedValue(undefined);
+      getBalanceMock.mockResolvedValue({ value: 100n }); // unchanged balance
+
+      const { result } = renderHook(() => useVaultDeposit());
+
+      await act(async () => {
+        await result.current.fundAndDeposit();
+      });
+
+      await act(async () => {
+        await onUserExitedCb?.();
+      });
+
+      expect(writeContractMock).not.toHaveBeenCalled();
+      expect(result.current.status).toBe('idle');
+    });
+
+    it('deposit() delegates to funding modal (same as fundAndDeposit)', async () => {
+      fundWalletMock.mockResolvedValue(undefined);
+      getBalanceMock
+        .mockResolvedValueOnce({ value: 0n })
+        .mockResolvedValueOnce({ value: 50n });
+
+      const { result } = renderHook(() => useVaultDeposit());
+
+      await act(async () => {
+        await result.current.deposit();
+      });
+
+      expect(fundWalletMock).toHaveBeenCalled();
+      expect(result.current.status).toBe('funding');
+
+      await act(async () => {
+        await onUserExitedCb?.();
+      });
+
+      expect(writeContractMock).not.toHaveBeenCalled();
+      expect(result.current.status).toBe('success');
+    });
+
+    it('useVaultDeposit({}) is equivalent to useVaultDeposit()', async () => {
+      fundWalletMock.mockResolvedValue(undefined);
+      getBalanceMock.mockResolvedValue({ value: 100n });
+
+      const { result } = renderHook(() => useVaultDeposit({}));
+      expect(result.current.status).toBe('idle');
+
+      await act(async () => {
+        await result.current.fundAndDeposit();
+      });
+
+      expect(fundWalletMock).toHaveBeenCalled();
+      expect(writeContractMock).not.toHaveBeenCalled();
+    });
+  });
 });

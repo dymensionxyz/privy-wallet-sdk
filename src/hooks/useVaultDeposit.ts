@@ -13,8 +13,12 @@ import { normalizeError } from '../utils/errors';
 import type { FundAccountOptions } from './useAccountFunding';
 
 export interface UseVaultDepositOptions {
-  /** Full contract config: address, ABI, function name, and optional static args. */
-  contract: VaultContractConfig;
+  /**
+   * Full contract config: address, ABI, function name, and optional static args.
+   * When omitted (phase 1), deposit actions only fund the user's embedded wallet
+   * without any on-chain contract call. Supply this to activate vault deposit (phase 2).
+   */
+  contract?: VaultContractConfig;
 }
 
 /**
@@ -28,8 +32,8 @@ export interface UseVaultDepositOptions {
  * Both paths share a single status / result model so the consumer only needs one
  * piece of UI to track progress.
  */
-export function useVaultDeposit(options: UseVaultDepositOptions) {
-  const { contract } = options;
+export function useVaultDeposit(options?: UseVaultDepositOptions) {
+  const { contract } = options ?? {};
 
   const { address } = useAccount();
   const wagmiConfig = useConfig();
@@ -41,7 +45,7 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
   const awaitingFunding = useRef(false);
   const preFundBalance = useRef<bigint>(0n);
 
-  // --- contract write -------------------------------------------------
+  // --- contract write (only used when contract is provided) -----------
   const {
     writeContract,
     data: hash,
@@ -81,9 +85,10 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
     }
   }, [receipt, hash]);
 
-  // --- internal: execute the contract call ----------------------------
+  // --- internal: execute the vault contract call (phase 2 only) ------
   const execDeposit = useCallback(
     async (valueWei?: bigint) => {
+      if (!contract) return;
       setStatus('depositing');
       resetWrite?.();
       try {
@@ -108,8 +113,8 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
       if (!awaitingFunding.current) return;
       awaitingFunding.current = false;
 
-      // Only proceed with the deposit if the balance actually increased,
-      // which distinguishes a completed funding from a dismissed modal.
+      // Only proceed if the balance actually increased, which distinguishes
+      // a completed funding from a dismissed modal.
       const currentAddress = address;
       if (!currentAddress) {
         setStatus('idle');
@@ -118,37 +123,31 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
       try {
         const postBal = await getBalance(wagmiConfig, { address: currentAddress });
         if (postBal.value > preFundBalance.current) {
-          execDeposit(pendingDepositValue.current);
+          if (contract) {
+            // Phase 2: fund then call vault contract.
+            execDeposit(pendingDepositValue.current);
+          } else {
+            // Phase 1: wallet is funded — that's all we need.
+            setStatus('success');
+            setResult({});
+          }
         } else {
           setStatus('idle');
         }
       } catch {
-        // If balance check fails, fall back to attempting the deposit
-        execDeposit(pendingDepositValue.current);
+        if (contract) {
+          // If balance check fails with a vault, fall back to attempting the deposit.
+          execDeposit(pendingDepositValue.current);
+        } else {
+          setStatus('idle');
+        }
       }
     },
   });
 
-  // --- public: deposit directly from wallet ---------------------------
-  const deposit = useCallback(
-    async (valueWei?: bigint) => {
-      setResult(null);
-      awaitingFunding.current = false;
-      await execDeposit(valueWei);
-    },
-    [execDeposit],
-  );
-
-  // --- public: fund first, then deposit -------------------------------
-  const fundAndDeposit = useCallback(
-    async (valueWei?: bigint, fundingOptions?: FundAccountOptions) => {
-      const targetAddress = address;
-      if (!targetAddress) {
-        setStatus('error');
-        setResult({ error: new Error('No wallet connected') });
-        return;
-      }
-
+  // --- internal: shared funding modal logic ---------------------------
+  const openFunding = useCallback(
+    async (targetAddress: `0x${string}`, valueWei?: bigint, fundingOptions?: FundAccountOptions) => {
       setResult(null);
       setStatus('funding');
       pendingDepositValue.current = valueWei;
@@ -183,7 +182,43 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
         setResult({ error: e instanceof Error ? e : new Error(normalizeError(e)) });
       }
     },
-    [address, fundWallet, wagmiConfig],
+    [wagmiConfig, fundWallet],
+  );
+
+  // --- public: deposit / fund account ---------------------------------
+  const deposit = useCallback(
+    async (valueWei?: bigint, fundingOptions?: FundAccountOptions) => {
+      if (contract) {
+        // Phase 2: call the vault contract directly from the existing wallet balance.
+        setResult(null);
+        awaitingFunding.current = false;
+        await execDeposit(valueWei);
+      } else {
+        // Phase 1: no vault — just open the funding modal.
+        const targetAddress = address;
+        if (!targetAddress) {
+          setStatus('error');
+          setResult({ error: new Error('No wallet connected') });
+          return;
+        }
+        await openFunding(targetAddress, valueWei, fundingOptions);
+      }
+    },
+    [contract, address, execDeposit, openFunding],
+  );
+
+  // --- public: fund first, then deposit (or just fund in phase 1) ----
+  const fundAndDeposit = useCallback(
+    async (valueWei?: bigint, fundingOptions?: FundAccountOptions) => {
+      const targetAddress = address;
+      if (!targetAddress) {
+        setStatus('error');
+        setResult({ error: new Error('No wallet connected') });
+        return;
+      }
+      await openFunding(targetAddress, valueWei, fundingOptions);
+    },
+    [address, openFunding],
   );
 
   // --- reset ----------------------------------------------------------
@@ -196,11 +231,17 @@ export function useVaultDeposit(options: UseVaultDepositOptions) {
   }, [resetWrite]);
 
   return {
-    /** Deposit directly from existing wallet balance. */
+    /**
+     * Phase 1 (no contract): opens Privy funding modal to top up the wallet.
+     * Phase 2 (contract provided): calls the vault contract directly from existing balance.
+     */
     deposit,
-    /** Open Privy funding first, then deposit once the modal closes. */
+    /**
+     * Opens Privy funding modal first. In phase 1 succeeds once balance increases.
+     * In phase 2 also calls the vault contract afterward.
+     */
     fundAndDeposit,
-    /** Current phase of the vault deposit flow. */
+    /** Current phase of the deposit flow. */
     status: isWritePending ? 'depositing' as const : status,
     result,
     error: result?.error?.message ?? writeError?.message ?? null,
