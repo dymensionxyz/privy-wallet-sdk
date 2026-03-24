@@ -1,5 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
-import { useOAuthTokens } from '@privy-io/react-auth';
+import { useState } from 'react';
 import {
   WalletSdkProvider,
   useWalletAuth,
@@ -7,112 +6,186 @@ import {
   useMessageSigning,
 } from 'privy-wallet-sdk';
 import type { FundAccountOptions } from 'privy-wallet-sdk';
-import { sepolia } from 'viem/chains';
-import { parseEther } from 'viem';
+import { useBalance, useReadContract } from 'wagmi';
+import { anvil } from 'viem/chains';
+import { parseUnits, formatUnits, pad, toHex } from 'viem';
 
 const appId = import.meta.env.VITE_PRIVY_APP_ID ?? '';
 const serverUrl = (import.meta.env.VITE_SERVER_URL ?? '').replace(/\/$/, '');
-const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '';
+const vaultAddress = (import.meta.env.VITE_VAULT_ADDRESS ?? '') as `0x${string}`;
+const usdcAddress = (import.meta.env.VITE_USDC_ADDRESS ?? '') as `0x${string}`;
 
 const sdkConfig = {
   appId,
-  chains: [sepolia] as [typeof sepolia],
+  chains: [anvil] as [typeof anvil],
 };
+
+// Minimal ABI for CasinoVault.getSettledBalance(bytes32, address) → uint256
+const VAULT_BALANCE_ABI = [
+  {
+    name: 'getSettledBalance',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'accountId', type: 'bytes32' },
+      { name: 'token', type: 'address' },
+    ],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const;
+
+// Minimal ABI for ERC20.balanceOf(address) -> uint256
+const ERC20_BALANCE_OF_ABI = [
+  {
+    name: 'balanceOf',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const;
+
+/** Derive CasinoVault accountId from wallet address: bytes32(uint256(uint160(addr))) */
+function deriveAccountId(address: `0x${string}`): `0x${string}` {
+  return pad(toHex(BigInt(address)), { size: 32 });
+}
+
+// ---------------------------------------------------------------------------
+// Balances section
+// ---------------------------------------------------------------------------
+
+function BalancesSection({ address }: { address: `0x${string}` }) {
+  const accountId = deriveAccountId(address);
+
+  const { data: ethBalance } = useBalance({ address });
+  const {
+    data: usdcWalletBalance,
+    error: usdcWalletBalanceError,
+    isFetching: isUsdcWalletBalanceFetching,
+  } = useReadContract({
+    address: usdcAddress || undefined,
+    abi: ERC20_BALANCE_OF_ABI,
+    functionName: 'balanceOf',
+    args: [address],
+    // Local Anvil tokens may not fully support metadata paths used by useBalance(token),
+    // so read the canonical ERC-20 balance directly.
+    query: {
+      enabled: Boolean(usdcAddress),
+      retry: false,
+    },
+  });
+  const {
+    data: vaultBalance,
+    refetch: refetchVault,
+    error: vaultBalanceError,
+    isFetching: isVaultBalanceFetching,
+  } = useReadContract({
+    address: vaultAddress || undefined,
+    abi: VAULT_BALANCE_ABI,
+    functionName: 'getSettledBalance',
+    args: [accountId, usdcAddress],
+    // Reverts are expected when vault/token deployment is mismatched; avoid noisy retries.
+    query: {
+      enabled: Boolean(vaultAddress && usdcAddress),
+      retry: false,
+    },
+  });
+
+  const noConfig = !vaultAddress || !usdcAddress;
+
+  return (
+    <section style={{ marginBottom: 24 }}>
+      <h2>Balances</h2>
+      {noConfig && (
+        <p style={{ fontSize: 12, color: '#a1a1aa' }}>
+          Set VITE_VAULT_ADDRESS and VITE_USDC_ADDRESS in .env to see balances.
+        </p>
+      )}
+      <table style={{ borderCollapse: 'collapse', fontSize: 14 }}>
+        <tbody>
+          <tr>
+            <td style={{ paddingRight: 16, color: '#a1a1aa' }}>ETH</td>
+            <td>
+              {ethBalance
+                ? `${parseFloat(formatUnits(ethBalance.value, 18)).toFixed(6)} ETH`
+                : '—'}
+            </td>
+          </tr>
+          <tr>
+            <td style={{ paddingRight: 16, color: '#a1a1aa' }}>USDC (wallet)</td>
+            <td>
+              {isUsdcWalletBalanceFetching
+                ? 'Loading...'
+                : usdcWalletBalance !== undefined
+                ? `${parseFloat(formatUnits(usdcWalletBalance as bigint, 6)).toFixed(2)} USDC`
+                : '—'}
+            </td>
+          </tr>
+          <tr>
+            <td style={{ paddingRight: 16, color: '#a1a1aa' }}>Vault settled</td>
+            <td>
+              {isVaultBalanceFetching
+                ? 'Loading...'
+                : vaultBalance !== undefined
+                ? `${parseFloat(formatUnits(vaultBalance as bigint, 6)).toFixed(2)} USDC`
+                : '—'}
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      {!noConfig && vaultBalanceError && (
+        <p style={{ marginTop: 8, fontSize: 12, color: '#f87171' }}>
+          Vault balance read reverted. Verify that `VITE_VAULT_ADDRESS` and `VITE_USDC_ADDRESS`
+          are from the same Anvil deployment and the token is supported by the vault.
+        </p>
+      )}
+      {!!usdcAddress && usdcWalletBalanceError && (
+        <p style={{ marginTop: 8, fontSize: 12, color: '#f87171' }}>
+          USDC wallet balance read failed. Verify `VITE_USDC_ADDRESS` points to an ERC-20 token
+          deployed on the current Anvil instance.
+        </p>
+      )}
+      {!noConfig && (
+        <button
+          type="button"
+          onClick={() => refetchVault()}
+          style={{ marginTop: 8, fontSize: 12 }}
+        >
+          Refresh vault balance
+        </button>
+      )}
+    </section>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Test page inner component (must be inside WalletSdkProvider)
 // ---------------------------------------------------------------------------
 
-type FundingAsset = 'native-currency' | 'USDC';
-
 function TestPage() {
   const auth = useWalletAuth();
-  // Phase 1: no vault contract — deposit actions fund the embedded wallet directly.
-  const vault = useVaultDeposit();
+  const vault = useVaultDeposit({
+    vault: { vaultAddress, tokenAddress: usdcAddress },
+  });
   const signing = useMessageSigning();
 
-  const [depositAmount, setDepositAmount] = useState('0.001');
-  const [fundingAsset, setFundingAsset] = useState<FundingAsset>('native-currency');
+  const [depositAmount, setDepositAmount] = useState('10');
   const [validationMessage, setValidationMessage] = useState('');
   const [submitStatus, setSubmitStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const [googleToken, setGoogleToken] = useState<string | null>(null);
-  const googleTokenRef = useRef<string | null>(null);
-  const [profileData, setProfileData] = useState<unknown>(null);
-  const [profileStatus, setProfileStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
-  const [profileError, setProfileError] = useState<string | null>(null);
-
-  const { reauthorize } = useOAuthTokens({
-    onOAuthTokenGrant: ({ oAuthTokens }) => {
-      if (oAuthTokens.provider === 'google') {
-        googleTokenRef.current = oAuthTokens.accessToken;
-        setGoogleToken(oAuthTokens.accessToken);
-      }
-    },
-  });
-
-  const handleFetchProfile = async () => {
-    if (!serverUrl) return;
-    setProfileStatus('pending');
-    setProfileError(null);
-    try {
-      if (!googleTokenRef.current) {
-        console.debug('[Profile] No cached Google token, requesting reauthorization…');
-        await reauthorize({ provider: 'google' });
-      }
-      const token = googleTokenRef.current;
-      console.debug('[Profile] Google token present:', !!token);
-      console.debug('[Profile] Token preview:', token ? `${token.slice(0, 20)}…(${token.length} chars)` : 'null');
-      if (!token) throw new Error('Google token not available after reauthorization');
-
-      const url = `${serverUrl}/api/builders/me`;
-      console.debug('[Profile] GET', url);
-      console.debug('[Profile] Authorization header:', `Bearer ${token.slice(0, 20)}…`);
-
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      console.debug('[Profile] Response status:', res.status, res.statusText);
-      if (!res.ok) {
-        const body = await res.text();
-        console.error('[Profile] Error body:', body);
-        throw new Error(body || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      console.debug('[Profile] Success payload:', data);
-      setProfileData(data);
-      setProfileStatus('success');
-    } catch (err) {
-      console.error('[Profile] Fetch failed:', err);
-      setProfileStatus('error');
-      setProfileError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  // -- Sign message via SDK, then POST to backend for debug verification --
   const handleSignAndSend = async () => {
     if (!serverUrl || !auth.address || !validationMessage.trim()) return;
     setSubmitStatus('pending');
     setSubmitError(null);
     try {
       const signature = await signing.signMessage(validationMessage);
-
       const res = await fetch(`${serverUrl}/testvalidation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          address: auth.address,
-          message: validationMessage,
-          signature,
-        }),
+        body: JSON.stringify({ address: auth.address, message: validationMessage, signature }),
       });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
       setSubmitStatus('success');
     } catch (err) {
       setSubmitStatus('error');
@@ -120,13 +193,23 @@ function TestPage() {
     }
   };
 
-  const valueWei = (() => {
-    try { return parseEther(depositAmount || '0'); } catch { return undefined; }
+  // Parse USDC amount: decimal string → bigint (6 decimals)
+  const usdcAmount = (() => {
+    try { return parseUnits(depositAmount || '0', 6); } catch { return undefined; }
   })();
 
-  const fundingOptions: FundAccountOptions = {
-    asset: fundingAsset,
-    amount: depositAmount || undefined,
+  const depositDisabled =
+    vault.status !== 'idle' || !usdcAmount || usdcAmount <= 0n || !vaultAddress || !usdcAddress;
+
+  const fundingOptions: FundAccountOptions = { asset: 'USDC', amount: depositAmount || undefined };
+
+  const depositStatusLabel: Record<typeof vault.status, string> = {
+    idle: 'Deposit USDC',
+    approving: 'Approving…',
+    depositing: 'Depositing…',
+    funding: 'Funding…',
+    success: 'Deposit USDC',
+    error: 'Deposit USDC',
   };
 
   return (
@@ -155,76 +238,50 @@ function TestPage() {
         )}
       </section>
 
-      {auth.isAuthenticated && auth.user?.google && (
-        <section style={{ marginBottom: 24 }}>
-          <h2>Profile</h2>
-          <p style={{ fontSize: 12, color: '#71717a' }}>
-            GET {serverUrl || '—'}/builders/me (Bearer: Google OAuth token)
-          </p>
-          <button
-            type="button"
-            onClick={handleFetchProfile}
-            disabled={profileStatus === 'pending'}
-          >
-            {profileStatus === 'pending' ? 'Loading…' : 'Profile'}
-          </button>
-          {!googleToken && profileStatus === 'idle' && (
-            <p style={{ fontSize: 12, color: '#71717a', marginTop: 4 }}>
-              Will request Google authorization if needed.
-            </p>
-          )}
-          {profileStatus === 'success' && profileData !== null && (
-            <pre style={{ marginTop: 8, padding: 8, background: '#27272a', color: '#e4e4e7', borderRadius: 4, overflow: 'auto', fontSize: 12 }}>
-              {JSON.stringify(profileData, null, 2)}
-            </pre>
-          )}
-          {profileError && (
-            <p style={{ color: '#f87171', marginTop: 8 }}>{profileError}</p>
-          )}
-        </section>
-      )}
-
-      {auth.isAuthenticated && (
+      {auth.isAuthenticated && auth.address && (
         <>
-          {/* ---- 2. Fund Account ------------------------------------- */}
+          {/* ---- 2. Balances ------------------------------------------ */}
+          <BalancesSection address={auth.address} />
+
+          {/* ---- 3. Deposit ------------------------------------------- */}
           <section style={{ marginBottom: 24 }}>
-            <h2>Fund Account</h2>
-            <p style={{ fontSize: 12, color: '#71717a' }}>
-              Phase 1: funds go directly into the embedded wallet (no vault contract).
-            </p>
+            <h2>Deposit USDC</h2>
+            {(!vaultAddress || !usdcAddress) && (
+              <p style={{ fontSize: 12, color: '#a1a1aa' }}>
+                Set VITE_VAULT_ADDRESS and VITE_USDC_ADDRESS in .env to enable deposits.
+              </p>
+            )}
 
             <div style={{ display: 'flex', gap: 16, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <label>
-                Asset:{' '}
-                <select
-                  value={fundingAsset}
-                  onChange={(e) => setFundingAsset(e.target.value as FundingAsset)}
-                  style={{ padding: 4 }}
-                >
-                  <option value="native-currency">ETH</option>
-                  <option value="USDC">USDC</option>
-                </select>
-              </label>
-
-              <label>
-                Amount:{' '}
+                Amount (USDC):{' '}
                 <input
                   type="text"
                   value={depositAmount}
                   onChange={(e) => setDepositAmount(e.target.value)}
-                  placeholder={fundingAsset === 'USDC' ? 'e.g. 10' : 'e.g. 0.001'}
+                  placeholder="e.g. 10"
                   style={{ padding: 6, width: 100 }}
                 />
               </label>
             </div>
 
             <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+              {/* Path A: deposit from existing wallet balance */}
               <button
                 type="button"
-                onClick={() => vault.fundAndDeposit(fundingAsset === 'native-currency' ? valueWei : undefined, fundingOptions)}
-                disabled={vault.status === 'funding'}
+                onClick={() => usdcAmount && vault.deposit(usdcAmount)}
+                disabled={depositDisabled}
               >
-                {vault.status === 'funding' ? 'Funding…' : `Fund with ${fundingAsset === 'USDC' ? 'USDC' : 'ETH'}`}
+                {depositStatusLabel[vault.status]}
+              </button>
+
+              {/* Path B: fund via on-ramp first, then deposit */}
+              <button
+                type="button"
+                onClick={() => usdcAmount && vault.fundAndDeposit(usdcAmount, fundingOptions)}
+                disabled={vault.status !== 'idle' || !vaultAddress || !usdcAddress}
+              >
+                {vault.status === 'funding' ? 'Funding…' : 'Buy USDC & Deposit'}
               </button>
 
               {vault.status !== 'idle' && (
@@ -234,15 +291,23 @@ function TestPage() {
               )}
             </div>
 
+            {vault.status === 'approving' && (
+              <p style={{ color: '#facc15', fontSize: 13 }}>Step 1/2: Approving USDC spend…</p>
+            )}
+            {vault.status === 'depositing' && (
+              <p style={{ color: '#60a5fa', fontSize: 13 }}>Step 2/2: Depositing into vault…</p>
+            )}
             {vault.status === 'success' && (
-              <p style={{ color: '#4ade80' }}>Wallet funded successfully.</p>
+              <p style={{ color: '#4ade80' }}>
+                Deposit successful!{vault.hash ? ` Tx: ${vault.hash}` : ''}
+              </p>
             )}
             {vault.error && (
               <p style={{ color: '#f87171' }}>{vault.error}</p>
             )}
           </section>
 
-          {/* ---- 3. Sign Message + Debug Submit ----------------------- */}
+          {/* ---- 4. Sign Message -------------------------------------- */}
           <section style={{ marginBottom: 24 }}>
             <h2>Sign Message</h2>
             <p style={{ fontSize: 12, color: '#71717a' }}>
@@ -285,156 +350,6 @@ function TestPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Vanilla Google Login (no Privy) — uses Google Identity Services directly
-// ---------------------------------------------------------------------------
-
-function VanillaGoogleLogin() {
-  const [idToken, setIdToken] = useState<string | null>(null);
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const initializedRef = useRef(false);
-  const buttonRef = useRef<HTMLDivElement | null>(null);
-
-  const [profileData, setProfileData] = useState<unknown>(null);
-  const [profileStatus, setProfileStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
-  const [profileError, setProfileError] = useState<string | null>(null);
-
-  const handleCredential = useCallback((response: CredentialResponse) => {
-    const jwt = response.credential;
-    console.debug('[VanillaGoogle] ID token (JWT) received:', `${jwt.slice(0, 20)}…(${jwt.length} chars)`);
-
-    // Decode the JWT payload to extract the email (no verification needed client-side)
-    try {
-      const payload = JSON.parse(atob(jwt.split('.')[1]));
-      console.debug('[VanillaGoogle] JWT payload:', payload);
-      setUserEmail(payload.email ?? null);
-    } catch {
-      console.warn('[VanillaGoogle] Could not decode JWT payload');
-    }
-
-    setIdToken(jwt);
-    setLoginError(null);
-  }, []);
-
-  const initGsi = useCallback((node: HTMLDivElement | null) => {
-    buttonRef.current = node;
-    if (!node || initializedRef.current || !googleClientId) return;
-    if (typeof google === 'undefined') return;
-
-    google.accounts.id.initialize({
-      client_id: googleClientId,
-      callback: handleCredential,
-    });
-    google.accounts.id.renderButton(node, {
-      type: 'standard',
-      theme: 'outline',
-      size: 'large',
-      text: 'signin_with',
-    });
-    initializedRef.current = true;
-  }, [handleCredential]);
-
-  const handleLogout = () => {
-    if (userEmail) {
-      google.accounts.id.disableAutoSelect();
-    }
-    setIdToken(null);
-    setUserEmail(null);
-    setProfileData(null);
-    setProfileStatus('idle');
-    setProfileError(null);
-    initializedRef.current = false;
-  };
-
-  const handleFetchProfile = async () => {
-    if (!serverUrl || !idToken) return;
-    setProfileStatus('pending');
-    setProfileError(null);
-    try {
-      const url = `${serverUrl}/api/builders/me`;
-      console.debug('[VanillaGoogle] GET', url);
-      console.debug('[VanillaGoogle] ID token preview:', `${idToken.slice(0, 20)}…(${idToken.length} chars)`);
-      console.debug('[VanillaGoogle] Authorization header:', `Bearer ${idToken.slice(0, 20)}…`);
-
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${idToken}` },
-      });
-
-      console.debug('[VanillaGoogle] Response status:', res.status, res.statusText);
-      if (!res.ok) {
-        const body = await res.text();
-        console.error('[VanillaGoogle] Error body:', body);
-        throw new Error(body || `HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      console.debug('[VanillaGoogle] Success payload:', data);
-      setProfileData(data);
-      setProfileStatus('success');
-    } catch (err) {
-      console.error('[VanillaGoogle] Fetch failed:', err);
-      setProfileStatus('error');
-      setProfileError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  if (!googleClientId) {
-    return (
-      <section style={{ marginBottom: 24, padding: 16, border: '1px solid #3f3f46', borderRadius: 8 }}>
-        <h2>Vanilla Google Login (no Privy)</h2>
-        <p style={{ fontSize: 12, color: '#71717a' }}>
-          Set VITE_GOOGLE_CLIENT_ID in .env to enable.
-        </p>
-      </section>
-    );
-  }
-
-  return (
-    <section style={{ marginBottom: 24, padding: 16, border: '1px solid #3f3f46', borderRadius: 8 }}>
-      <h2>Vanilla Google Login (no Privy)</h2>
-      <p style={{ fontSize: 12, color: '#71717a', marginBottom: 8 }}>
-        Uses Google Identity Services directly — ID token (JWT) sent to {serverUrl || '—'}/api/builders/me
-      </p>
-
-      {!idToken ? (
-        <div ref={initGsi} />
-      ) : (
-        <div>
-          <p>Signed in{userEmail ? `: ${userEmail}` : ''}</p>
-          <p style={{ fontSize: 12, color: '#71717a' }}>
-            ID token: {idToken.slice(0, 24)}…
-          </p>
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button
-              type="button"
-              onClick={handleFetchProfile}
-              disabled={profileStatus === 'pending' || !serverUrl}
-            >
-              {profileStatus === 'pending' ? 'Loading…' : 'Fetch Profile'}
-            </button>
-            <button type="button" onClick={handleLogout}>
-              Log out
-            </button>
-          </div>
-        </div>
-      )}
-
-      {profileStatus === 'success' && profileData !== null && (
-        <pre style={{ marginTop: 8, padding: 8, background: '#27272a', color: '#e4e4e7', borderRadius: 4, overflow: 'auto', fontSize: 12 }}>
-          {JSON.stringify(profileData, null, 2)}
-        </pre>
-      )}
-      {profileError && (
-        <p style={{ color: '#f87171', marginTop: 8 }}>{profileError}</p>
-      )}
-      {loginError && (
-        <p style={{ color: '#f87171', marginTop: 8 }}>{loginError}</p>
-      )}
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // App root
 // ---------------------------------------------------------------------------
 
@@ -449,7 +364,6 @@ export default function App() {
 
   return (
     <div style={{ padding: 24, maxWidth: 480, margin: '0 auto' }}>
-      <VanillaGoogleLogin />
       <WalletSdkProvider config={sdkConfig}>
         <TestPage />
       </WalletSdkProvider>
