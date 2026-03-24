@@ -150,10 +150,9 @@ function SignSection() {
 
 ### Low-level hooks
 
-The high-level hooks above compose these lower-level primitives, which are still exported for advanced use cases:
+The high-level hooks above compose this lower-level primitive, which is still exported for advanced use cases:
 
 - **`useAccountFunding()`** — opens Privy's funding modal directly.
-- **`useDeposit({ contractAddress })`** — calls a hardcoded payable `deposit()` and tracks tx status.
 
 ## API Reference
 
@@ -164,7 +163,6 @@ The high-level hooks above compose these lower-level primitives, which are still
 | `useVaultDeposit(opts)` | `deposit(amount)`, `fundAndDeposit(amount, fundingOpts?)`, `status`, `hash`, `receipt`, `error`, `reset` |
 | `useMessageSigning()` | `signMessage(msg)`, `status`, `signature`, `error`, `reset` |
 | `useAccountFunding()` | `fundAccount(address?, options?)`, `status`, `error`, `reset` |
-| `useDeposit(opts)` | `deposit(valueWei?)`, `status`, `result`, `hash`, `receipt`, `error`, `reset` |
 
 ## Example test page
 

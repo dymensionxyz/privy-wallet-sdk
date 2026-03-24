@@ -399,34 +399,6 @@ Opens Privy's funding modal standalone, without triggering a contract call after
 
 ---
 
-### 4.5 `useDeposit(options)` *(low-level)*
-
-Calls a hardcoded `deposit()` (no-arg, payable) on a given contract. Use `useVaultDeposit` instead for full flexibility; use this only when your contract literally has a `deposit()` with no arguments.
-
-#### Options
-
-```ts
-interface UseDepositOptions {
-  contractAddress: `0x${string}`;
-}
-```
-
-#### Return value
-
-```ts
-{
-  deposit:  (valueWei?: bigint) => Promise<void>;
-  status:   DepositStatus;   // 'idle' | 'pending' | 'success' | 'error'
-  result:   DepositResult | null;
-  hash:     `0x${string}` | undefined;
-  receipt:  { status: 'success' | 'reverted'; blockNumber: bigint } | undefined;
-  error:    string | null;
-  reset:    () => void;
-}
-```
-
----
-
 ## 5. Type Definitions Summary
 
 All types are importable from `privy-wallet-sdk`:
@@ -439,13 +411,10 @@ import type {
   VaultDepositStatus,    // 'idle' | 'funding' | 'depositing' | 'success' | 'error'
   VaultDepositResult,    // { hash?, receipt?, error? }
   FundingStatus,         // 'idle' | 'pending' | 'success' | 'error'
-  DepositStatus,         // 'idle' | 'pending' | 'success' | 'error'
-  DepositResult,         // { hash?, receipt?, error? }
   SigningStatus,         // 'idle' | 'pending' | 'success' | 'error'
   SigningResult,         // { signature?, error? }
   SignMessageOptions,    // { throwOnError?: boolean }
   UseVaultDepositOptions,
-  UseDepositOptions,
   FundAccountOptions,
 } from 'privy-wallet-sdk';
 

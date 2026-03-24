@@ -32,20 +32,6 @@ export interface PrivyClientConfigLike {
 export type FundingStatus = 'idle' | 'pending' | 'success' | 'error';
 
 // ---------------------------------------------------------------------------
-// Low-level deposit (useDeposit)
-// ---------------------------------------------------------------------------
-
-/** Deposit tx status for useDeposit */
-export type DepositStatus = 'idle' | 'pending' | 'success' | 'error';
-
-/** Result of a deposit() call */
-export interface DepositResult {
-  hash?: `0x${string}`;
-  receipt?: { status: 'success' | 'reverted'; blockNumber: bigint };
-  error?: Error;
-}
-
-// ---------------------------------------------------------------------------
 // High-level vault deposit (useVaultDeposit)
 // ---------------------------------------------------------------------------
 
