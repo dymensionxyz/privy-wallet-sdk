@@ -1,4 +1,4 @@
-import type { Abi, Chain } from 'viem';
+import type { Chain } from 'viem';
 
 /** Config passed to WalletSdkProvider */
 export interface WalletSdkConfig {
@@ -49,24 +49,21 @@ export interface DepositResult {
 // High-level vault deposit (useVaultDeposit)
 // ---------------------------------------------------------------------------
 
-/** Contract call configuration for the vault deposit hook. */
-export interface VaultContractConfig {
-  /** Contract address */
-  address: `0x${string}`;
-  /** Contract ABI (must include the target function) */
-  abi: Abi;
-  /** Function name to invoke */
-  functionName: string;
-  /** Optional static args passed to the function on every call */
-  args?: readonly unknown[];
+/** CasinoVault contract configuration for the vault deposit hook. */
+export interface CasinoVaultConfig {
+  /** CasinoVault contract address */
+  vaultAddress: `0x${string}`;
+  /** USDC ERC-20 token address */
+  tokenAddress: `0x${string}`;
 }
 
 /**
  * Multi-phase status for the vault deposit flow.
- * - idle → funding → depositing → success
+ * - idle → approving → depositing → success
+ * - idle → funding → approving → depositing → success (fundAndDeposit path)
  * - Any phase can transition to error.
  */
-export type VaultDepositStatus = 'idle' | 'funding' | 'depositing' | 'success' | 'error';
+export type VaultDepositStatus = 'idle' | 'funding' | 'approving' | 'depositing' | 'success' | 'error';
 
 /** Result returned by useVaultDeposit */
 export interface VaultDepositResult {

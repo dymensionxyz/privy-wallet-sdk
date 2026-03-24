@@ -3,51 +3,89 @@ import { useAccount, useConfig } from 'wagmi';
 import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
 import { getBalance } from 'wagmi/actions';
 import { useFundWallet } from '@privy-io/react-auth';
+import { pad, toHex } from 'viem';
 import type { Chain } from 'viem';
 import type {
-  VaultContractConfig,
+  CasinoVaultConfig,
   VaultDepositResult,
   VaultDepositStatus,
 } from '../types/public';
 import { normalizeError } from '../utils/errors';
 import type { FundAccountOptions } from './useAccountFunding';
 
+// Minimal ABI fragment for ERC-20 approve.
+const ERC20_APPROVE_ABI = [
+  {
+    name: 'approve',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'spender', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+] as const;
+
+// Minimal ABI fragment for CasinoVault.deposit(address,uint256,bytes32).
+const CASINO_VAULT_DEPOSIT_ABI = [
+  {
+    name: 'deposit',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'accountId', type: 'bytes32' },
+    ],
+    outputs: [],
+  },
+] as const;
+
+/**
+ * Derives the CasinoVault accountId for a given wallet address.
+ * Encoding: bytes32(uint256(uint160(addr))) — left-pads the address to 32 bytes.
+ */
+function deriveAccountId(address: `0x${string}`): `0x${string}` {
+  return pad(toHex(BigInt(address)), { size: 32 });
+}
+
 export interface UseVaultDepositOptions {
-  /**
-   * Full contract config: address, ABI, function name, and optional static args.
-   * When omitted (phase 1), deposit actions only fund the user's embedded wallet
-   * without any on-chain contract call. Supply this to activate vault deposit (phase 2).
-   */
-  contract?: VaultContractConfig;
+  /** CasinoVault contract address and USDC token address. */
+  vault: CasinoVaultConfig;
 }
 
 /**
- * High-level vault deposit hook.
+ * CasinoVault USDC deposit hook.
  *
  * Orchestrates two paths:
- *  1. `deposit(value?)` — call the vault contract directly from existing wallet funds.
- *  2. `fundAndDeposit(value?, fundingOptions?)` — open Privy funding (MoonPay / on-ramp),
- *     then automatically call the vault contract once the funding modal closes.
+ *  1. `deposit(amount)` — approve USDC spend then call CasinoVault.deposit directly
+ *     from existing wallet funds.
+ *  2. `fundAndDeposit(amount, fundingOptions?)` — open Privy funding (MoonPay / on-ramp)
+ *     for USDC first, then automatically execute the approve + deposit once the modal closes.
  *
- * Both paths share a single status / result model so the consumer only needs one
- * piece of UI to track progress.
+ * `amount` is always in USDC units (6 decimals), e.g. `10_000_000n` = 10 USDC.
+ *
+ * Status transitions:
+ *   deposit path:       idle → approving → depositing → success
+ *   fundAndDeposit path: idle → funding → approving → depositing → success
  */
-export function useVaultDeposit(options?: UseVaultDepositOptions) {
-  const { contract } = options ?? {};
+export function useVaultDeposit(options: UseVaultDepositOptions) {
+  const { vault } = options;
+  const { vaultAddress, tokenAddress } = vault;
 
   const { address } = useAccount();
   const wagmiConfig = useConfig();
   const [status, setStatus] = useState<VaultDepositStatus>('idle');
   const [result, setResult] = useState<VaultDepositResult | null>(null);
 
-  // Track whether we should auto-deposit after funding completes.
-  const pendingDepositValue = useRef<bigint | undefined>(undefined);
+  const pendingDepositAmount = useRef<bigint | undefined>(undefined);
   const awaitingFunding = useRef(false);
   const preFundBalance = useRef<bigint>(0n);
 
-  // --- contract write (only used when contract is provided) -----------
+  // Single writeContract handle — reused for both approve and deposit calls.
   const {
-    writeContract,
+    writeContractAsync,
     data: hash,
     isPending: isWritePending,
     error: writeError,
@@ -85,36 +123,61 @@ export function useVaultDeposit(options?: UseVaultDepositOptions) {
     }
   }, [receipt, hash]);
 
-  // --- internal: execute the vault contract call (phase 2 only) ------
+  // --- internal: two-step approve → deposit --------------------------------
   const execDeposit = useCallback(
-    async (valueWei?: bigint) => {
-      if (!contract) return;
-      setStatus('depositing');
+    async (amount: bigint) => {
+      if (!address) {
+        setStatus('error');
+        setResult({ error: new Error('No wallet connected') });
+        return;
+      }
+      if (amount <= 0n) {
+        setStatus('error');
+        setResult({ error: new Error('Amount must be greater than zero') });
+        return;
+      }
+
+      const accountId = deriveAccountId(address);
+
+      // Step 1: approve
+      setStatus('approving');
       resetWrite?.();
       try {
-        await writeContract({
-          address: contract.address,
-          abi: contract.abi,
-          functionName: contract.functionName,
-          args: contract.args as unknown[] | undefined,
-          ...(valueWei !== undefined && valueWei !== null && { value: valueWei }),
+        await writeContractAsync({
+          address: tokenAddress,
+          abi: ERC20_APPROVE_ABI,
+          functionName: 'approve',
+          args: [vaultAddress, amount],
+        });
+      } catch (e) {
+        setStatus('error');
+        setResult({ error: e instanceof Error ? e : new Error(normalizeError(e)) });
+        return;
+      }
+
+      // Step 2: deposit
+      setStatus('depositing');
+      try {
+        await writeContractAsync({
+          address: vaultAddress,
+          abi: CASINO_VAULT_DEPOSIT_ABI,
+          functionName: 'deposit',
+          args: [tokenAddress, amount, accountId],
         });
       } catch (e) {
         setStatus('error');
         setResult({ error: e instanceof Error ? e : new Error(normalizeError(e)) });
       }
     },
-    [contract, writeContract, resetWrite],
+    [address, vaultAddress, tokenAddress, writeContractAsync, resetWrite],
   );
 
-  // --- funding --------------------------------------------------------
+  // --- funding -------------------------------------------------------------
   const { fundWallet } = useFundWallet({
     onUserExited: async () => {
       if (!awaitingFunding.current) return;
       awaitingFunding.current = false;
 
-      // Only proceed if the balance actually increased, which distinguishes
-      // a completed funding from a dismissed modal.
       const currentAddress = address;
       if (!currentAddress) {
         setStatus('idle');
@@ -123,21 +186,20 @@ export function useVaultDeposit(options?: UseVaultDepositOptions) {
       try {
         const postBal = await getBalance(wagmiConfig, { address: currentAddress });
         if (postBal.value > preFundBalance.current) {
-          if (contract) {
-            // Phase 2: fund then call vault contract.
-            execDeposit(pendingDepositValue.current);
+          const amount = pendingDepositAmount.current;
+          if (amount !== undefined) {
+            execDeposit(amount);
           } else {
-            // Phase 1: wallet is funded — that's all we need.
-            setStatus('success');
-            setResult({});
+            setStatus('idle');
           }
         } else {
           setStatus('idle');
         }
       } catch {
-        if (contract) {
-          // If balance check fails with a vault, fall back to attempting the deposit.
-          execDeposit(pendingDepositValue.current);
+        // If balance check fails, attempt the deposit anyway.
+        const amount = pendingDepositAmount.current;
+        if (amount !== undefined) {
+          execDeposit(amount);
         } else {
           setStatus('idle');
         }
@@ -145,12 +207,12 @@ export function useVaultDeposit(options?: UseVaultDepositOptions) {
     },
   });
 
-  // --- internal: shared funding modal logic ---------------------------
+  // --- internal: open Privy funding modal for USDC -------------------------
   const openFunding = useCallback(
-    async (targetAddress: `0x${string}`, valueWei?: bigint, fundingOptions?: FundAccountOptions) => {
+    async (targetAddress: `0x${string}`, amount?: bigint, fundingOptions?: FundAccountOptions) => {
       setResult(null);
       setStatus('funding');
-      pendingDepositValue.current = valueWei;
+      pendingDepositAmount.current = amount;
       awaitingFunding.current = true;
 
       try {
@@ -160,21 +222,22 @@ export function useVaultDeposit(options?: UseVaultDepositOptions) {
         preFundBalance.current = 0n;
       }
 
+      const defaultUsdcOptions: FundAccountOptions = { asset: 'USDC' };
+      const mergedOptions = fundingOptions ?? defaultUsdcOptions;
+
       try {
         await fundWallet({
           address: targetAddress,
-          ...(fundingOptions && {
-            options: {
-              chain: fundingOptions.chain as Chain | undefined,
-              amount: fundingOptions.amount,
-              asset: fundingOptions.asset as
-                | 'native-currency'
-                | 'USDC'
-                | { erc20: `0x${string}` }
-                | undefined,
-              defaultFundingMethod: fundingOptions.defaultFundingMethod,
-            },
-          }),
+          options: {
+            chain: mergedOptions.chain as Chain | undefined,
+            amount: mergedOptions.amount,
+            asset: mergedOptions.asset as
+              | 'native-currency'
+              | 'USDC'
+              | { erc20: `0x${string}` }
+              | undefined,
+            defaultFundingMethod: mergedOptions.defaultFundingMethod,
+          },
         });
       } catch (e) {
         awaitingFunding.current = false;
@@ -185,64 +248,48 @@ export function useVaultDeposit(options?: UseVaultDepositOptions) {
     [wagmiConfig, fundWallet],
   );
 
-  // --- public: deposit / fund account ---------------------------------
+  // --- public: deposit from existing wallet balance ------------------------
   const deposit = useCallback(
-    async (valueWei?: bigint, fundingOptions?: FundAccountOptions) => {
-      if (contract) {
-        // Phase 2: call the vault contract directly from the existing wallet balance.
-        setResult(null);
-        awaitingFunding.current = false;
-        await execDeposit(valueWei);
-      } else {
-        // Phase 1: no vault — just open the funding modal.
-        const targetAddress = address;
-        if (!targetAddress) {
-          setStatus('error');
-          setResult({ error: new Error('No wallet connected') });
-          return;
-        }
-        await openFunding(targetAddress, valueWei, fundingOptions);
-      }
+    async (amount: bigint) => {
+      setResult(null);
+      awaitingFunding.current = false;
+      await execDeposit(amount);
     },
-    [contract, address, execDeposit, openFunding],
+    [execDeposit],
   );
 
-  // --- public: fund first, then deposit (or just fund in phase 1) ----
+  // --- public: fund via on-ramp first, then deposit ------------------------
   const fundAndDeposit = useCallback(
-    async (valueWei?: bigint, fundingOptions?: FundAccountOptions) => {
+    async (amount: bigint, fundingOptions?: FundAccountOptions) => {
       const targetAddress = address;
       if (!targetAddress) {
         setStatus('error');
         setResult({ error: new Error('No wallet connected') });
         return;
       }
-      await openFunding(targetAddress, valueWei, fundingOptions);
+      await openFunding(targetAddress, amount, fundingOptions);
     },
     [address, openFunding],
   );
 
-  // --- reset ----------------------------------------------------------
+  // --- reset ---------------------------------------------------------------
   const reset = useCallback(() => {
     setStatus('idle');
     setResult(null);
     resetWrite?.();
     awaitingFunding.current = false;
-    pendingDepositValue.current = undefined;
+    pendingDepositAmount.current = undefined;
   }, [resetWrite]);
 
   return {
-    /**
-     * Phase 1 (no contract): opens Privy funding modal to top up the wallet.
-     * Phase 2 (contract provided): calls the vault contract directly from existing balance.
-     */
+    /** Approve USDC spend and deposit into CasinoVault from existing wallet balance. */
     deposit,
-    /**
-     * Opens Privy funding modal first. In phase 1 succeeds once balance increases.
-     * In phase 2 also calls the vault contract afterward.
-     */
+    /** Open Privy USDC on-ramp first, then approve and deposit once funded. */
     fundAndDeposit,
     /** Current phase of the deposit flow. */
-    status: isWritePending ? 'depositing' as const : status,
+    status: isWritePending
+      ? (status === 'approving' ? 'approving' as const : 'depositing' as const)
+      : status,
     result,
     error: result?.error?.message ?? writeError?.message ?? null,
     hash: result?.hash ?? hash ?? undefined,

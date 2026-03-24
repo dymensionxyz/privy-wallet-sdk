@@ -15,7 +15,7 @@ export type {
   FundingStatus,
   DepositStatus,
   DepositResult,
-  VaultContractConfig,
+  CasinoVaultConfig,
   VaultDepositStatus,
   VaultDepositResult,
   SigningStatus,
